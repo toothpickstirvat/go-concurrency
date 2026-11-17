@@ -65,5 +65,6 @@ go run -race ./03-sync-primitives
 
 ## 对应 gmaker 的代码
 
-- `internal/engine/engine.go` 里有 `sync.Once` 用于引擎初始化只跑一次的代码
+- `sync.Once` 在 gmaker 里主要用来保证 close 只执行一次（幂等关闭）：`internal/ledger/ledger.go:105`、
+  `internal/history/store.go:35` 的 `closeOnce`，以及 `internal/engine/worker_snapshot.go:137` 订阅取消函数里的 `once`
 - gmaker 大量用 `sync.RWMutex + map` 而不是 `sync.Map`，因为 key 数量有限、读写比例不极端，普通 map 更直观
