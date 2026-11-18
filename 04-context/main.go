@@ -1,3 +1,12 @@
+// 第 4 节：Context。根 ctx 4 秒超时，3 个 worker 分别需要 1s、3s、5s；
+// 每个 worker 再派生一个子 goroutine，并用 WithValue 传 requestID。
+//
+// 运行：
+//
+//	go run -race ./04-context
+//
+// 预期：worker 1、2 完成，它们的子任务被主动 cancel（context canceled）；
+// worker 3 和它的子任务因根 ctx 超时退出（context deadline exceeded）；总耗时约 4 秒。
 package main
 
 import (

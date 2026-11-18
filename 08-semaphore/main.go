@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -25,6 +26,7 @@ func taskA() {
 	// 原理：channel 满了，写入就阻塞；读走一个，腾出一个位置。
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
+	var running, maxRunning atomic.Int32 // 当前在跑的任务数、出现过的最大值，用来验证不超过 5
 	start := time.Now()
 
 	for i := 0; i < 100; i++ {
@@ -39,15 +41,22 @@ func taskA() {
 			// struct{}{} 是空结构体，不占内存，只用来占位
 			defer func() { <-sem }()
 
-			// 任务开始
-			fmt.Printf("[A] 任务 %d 开始 (%v)\n", id, time.Since(start))
+			// 任务开始：running 加 1，用 CAS 循环更新最大值
+			n := running.Add(1)
+			for {
+				m := maxRunning.Load()
+				if n <= m || maxRunning.CompareAndSwap(m, n) {
+					break
+				}
+			}
+			fmt.Printf("[A] 任务 %2d 开始，同时在跑 %d 个 (%v)\n", id, n, time.Since(start).Round(time.Millisecond))
 			time.Sleep(100 * time.Millisecond)
-			fmt.Printf("[A] 任务 %d 结束 (%v)\n", id, time.Since(start))
+			running.Add(-1)
 		}(i)
 	}
 
 	wg.Wait()
-	fmt.Printf("[A] 总耗时: %v\n\n", time.Since(start))
+	fmt.Printf("[A] 同时在跑的最大值: %d，总耗时: %v\n\n", maxRunning.Load(), time.Since(start).Round(time.Millisecond))
 }
 
 // taskB 用 weighted semaphore
@@ -56,6 +65,7 @@ func taskB() {
 
 	// NewWeighted(10)：总容量 10
 	sem := semaphore.NewWeighted(10)
+	var used atomic.Int64 // 当前已占用的配额，只用来打印；semaphore 自己不对外暴露这个值
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	start := time.Now()
@@ -77,11 +87,11 @@ func taskB() {
 			// Release 释放 w 个配额，必须在 defer 里
 			defer sem.Release(w)
 
-			// 任务开始
-			fmt.Printf("[B] 任务 %d (权重 %d) 开始，剩余配额约 %d (%v)\n",
-				id, w, 10-w, time.Since(start))
+			u := used.Add(w)
+			fmt.Printf("[B] 任务 %2d (权重 %d) 开始，已用配额 %2d/10 (%v)\n",
+				id, w, u, time.Since(start).Round(time.Millisecond))
 			time.Sleep(100 * time.Millisecond)
-			fmt.Printf("[B] 任务 %d (权重 %d) 结束 (%v)\n", id, w, time.Since(start))
+			used.Add(-w) // 在 defer Release 之前减，保证打印的已用值不会超过真实值
 		}(i, weight)
 	}
 

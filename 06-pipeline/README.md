@@ -44,6 +44,28 @@ cancel。fan-out项目里你已经写过两级的pipeline（路由 → relay →
 
 ---
 
+## 写之前先想清楚
+
+1. 每个stage是它输出channel的唯一写入方吗？那谁来close输出channel？
+2. 如果stage 3有3个goroutine同时写一个channel，怎么close？用WaitGroup汇总。
+3. 如果中途某个stage出错了（比如除零），怎么把错误传出来，并让整个pipeline停下来？（提示：加一个`errCh chan error`，或者用下一节的
+   errgroup）
+
+答案在文末。
+
+---
+
+## 自查方法
+
+```bash
+go run -race ./06-pipeline
+```
+
+应该打印 2、4、6、8、10、12、14、16、18、20 的平方：4、16、36...400。
+stage3 并发且每个数的处理时间波动比数据到达间隔大时，顺序会乱（见实验结果），但总数必须是 10。
+
+---
+
 ## 实验结果
 
 ### 基础版（无 sleep、无超时）
@@ -86,9 +108,25 @@ cancel。fan-out项目里你已经写过两级的pipeline（路由 → relay →
 
 ### 加分项 2：stage3 并发数改为 3
 
-3 个 goroutine 同时从 ch2 读、平方、写进 ch3，总耗时从约 820ms 降到 775ms，吞吐量提高了。
+3 个 goroutine 同时从 ch2 读、平方、写进 ch3。单次运行总耗时在 775–820ms 之间，和单 worker 差不多：
+瓶颈在 stage1、stage2（每个数各睡 10–50ms），stage3 不是最慢的一级，给它加并发提高不了整体吞吐。
 
-输出顺序仍然是有序的（4, 16, 36, ...），因为 ch2 和 ch3 都是无缓冲 channel，每个数从进入 stage3 到被打印都是原子的。给 ch3 加缓冲后（`make(chan int, 5)`），stage3 的 3 个 worker 可以同时写进缓冲区，但因为 stage2 还是按顺序发送，而且 main 读得很快，缓冲区没有积压多个数同时存在，所以顺序仍然没乱。
+**输出顺序仍然是有序的，给 ch3 加缓冲后也一样。** 原因是 stage3 的处理时间波动比数据到达的间隔小：
+
+- stage2 大约每 60ms 才放出一个偶数（stage1、stage2 各睡 10–50ms，奇数被过滤掉）。
+- stage3 每个数处理 10–50ms，最快和最慢只差 40ms。
+- 后一个数比前一个晚到约 60ms，就算前一个处理得最慢、后一个最快，后一个也追不上，所以不会乱序。
+
+在 `/tmp` 的副本里验证过（各跑 5 次，统计后一个数比前一个小的次数）：
+
+| stage3 每个数的处理时间 | 乱序次数 |
+|---|---|
+| 10–50ms（原版） | 0 0 0 0 0 |
+| 100–140ms（整体变慢，但波动仍是 40ms） | 0 0 0 0 0 |
+| 10–310ms（波动 300ms） | 3 2 2 4 2 |
+
+**乱序取决于处理时间的波动，不是快慢本身。** 多个 worker 并发处理时，只要后到的数可能比先到的数处理得快，顺序就会乱。
+pipeline 里一旦某一级并发了，就不能再假设输出有序；需要顺序时要带上序号，在下游重新排序。
 
 ### 加分项 3：context 超时取消
 
@@ -109,17 +147,6 @@ cancel。fan-out项目里你已经写过两级的pipeline（路由 → relay →
 ```
 
 正常跑完 10 个数，说明超时没有影响正常流程。
-
----
-
-## 写之前先想清楚
-
-1. 每个stage是它输出channel的唯一写入方吗？那谁来close输出channel？
-2. 如果stage 3有3个goroutine同时写一个channel，怎么close？用WaitGroup汇总。
-3. 如果中途某个stage出错了（比如除零），怎么把错误传出来，并让整个pipeline停下来？（提示：加一个`errCh chan error`，或者用下一节的
-   errgroup）
-
-答案在文末。
 
 ---
 
@@ -286,18 +313,10 @@ stage3 读到后写入 ch3 → 阻塞，等 main 读走
 
 ---
 
-## 自查方法
-
-```bash
-go run -race ./06-pipeline
-```
-
-应该打印 2、4、6、8、10、12、14、16、18、20 的平方：4、16、36...400。
-顺序可能乱（如果加了 sleep），但总数必须是10。
-
----
-
 ## 对应 gmaker 的代码
 
 - gmaker 的整个引擎就是一个大 pipeline：WebSocket → fanOut → dispatcher → worker → 下游服务
-- `internal/engine/engine.go` 启动顺序就是按 stage 依次启动的
+- `internal/engine/engine_dispatch.go:25-29` 每个市场两级 channel：fanOut → `dispatchCh` → `runMarketDispatcher`（engine_dispatch.go:50）→ `workerCh` → worker。
+  每一级只由上一级写入，背压沿着 channel 往回传
+- `internal/engine/engine.go:35` `workerChanBufferSize = 4096`、engine.go:42 `dispatchChanBufferSize`：缓冲区只能吸收突发流量，
+  注释里记录了缓冲太小导致的问题（docs/buglog.md #51）。这和 fan-out 项目里"缓冲只是推迟阻塞"的结论一致

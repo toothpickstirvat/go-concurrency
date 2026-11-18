@@ -1,8 +1,10 @@
 # Go 并发编程课程
 
-前置：已完成 `../fan-out` 项目，掌握 goroutine、channel、WaitGroup、select 背压。
+前置：已完成 `../go-fan-out` 项目，掌握 goroutine、channel、WaitGroup、select 背压。
 
-每一节都是你写代码、Claude 检查并讲解。
+每一节都是你写代码，写完后检查并讲解问题。每节的 README 里有任务、实验结果、踩过的坑、最佳实践和思考题答案。
+
+本机环境：Go 1.27，4 个逻辑 CPU。部分结论（定时器的 GC、Reset 语义）依赖 Go 1.23 以后的行为，README 里已注明。
 
 ---
 
@@ -30,7 +32,7 @@
 | `06-pipeline/`     | Pipeline | 多级 stage、背压、取消传播                     |
 | `07-errgroup/`     | 错误处理 | golang.org/x/sync/errgroup、第一个错误取消所有 |
 | `08-semaphore/`    | 信号量   | 限制并发数、weighted semaphore                 |
-| `09-timer-ticker/` | 定时器   | time.Timer、time.Ticker、重置陷阱、停止泄漏    |
+| `09-timer-ticker/` | 定时器   | time.Timer、time.Ticker、Go 1.23 后的 GC 与 Reset 语义 |
 
 ### 第四阶段：综合
 
@@ -42,7 +44,7 @@
 
 ## 学习顺序
 
-按目录编号顺序。每节结束时 Claude 会告诉你下一节要做什么。
+按目录编号顺序。每个目录可以单独运行，比如 `go run -race ./06-pipeline`；有子目录的节（01、02、03）每个子目录是一个独立程序。
 
 ## 和 gmaker 的关联
 

@@ -96,7 +96,9 @@ fail-page6 在 171ms 时失败，其他 8 个 goroutine 因为 ctx 取消立刻�
 总耗时: 441.504683ms
 ```
 
-前 3 个（page1, page2, fail-page3）先启动，page2 和 page1 成功后启动 page4 和 page5，fail-page3 在 441ms 时失败，其他所有等待中和运行中的都被取消。
+SetLimit 是一个滑动窗口：前 3 个（page1、page2、fail-page3）先启动，之后任何一个结束，main 里阻塞在 `g.Go` 的下一个才能启动。
+fail-page3 这次睡得久，到 441ms 才失败，ctx 被取消。之后 main 继续调用 `g.Go`，剩下的 URL 照样会启动 goroutine，
+但一进 select 就发现 ctx 已取消，立刻返回，所以 page7–page10、fail-page6 都打印"已取消"。
 
 ---
 
@@ -111,40 +113,49 @@ g.Go(func() error { return doWork(ctx) })
 err := g.Wait()  // 返回第一个非 nil error
 ```
 
-内部实现（简化）：
+内部实现（摘自 `golang.org/x/sync@v0.25.0/errgroup/errgroup.go`，有删减）：
 
 ```go
 type Group struct {
-    wg     sync.WaitGroup
-    cancel context.CancelFunc
-    errMu  sync.Mutex
-    err    error  // 只记住第一个
+    cancel  func(error)    // WithContext 时由 context.WithCancelCause 创建
+    wg      sync.WaitGroup
+    sem     chan token     // SetLimit 设置的信号量
+    errOnce sync.Once      // 只记录第一个错误
+    err     error
 }
 
 func (g *Group) Go(f func() error) {
+    if g.sem != nil {
+        g.sem <- token{}       // 有并发限制时先占一个名额，满了就阻塞
+    }
     g.wg.Add(1)
     go func() {
-        defer g.wg.Done()
+        defer g.done()         // wg.Done()，并从 sem 里释放名额
         if err := f(); err != nil {
-            g.errMu.Lock()
-            if g.err == nil {  // 只记第一个
+            g.errOnce.Do(func() {
                 g.err = err
-                g.cancel()     // 取消 ctx
-            }
-            g.errMu.Unlock()
+                if g.cancel != nil {
+                    g.cancel(g.err)   // 取消 ctx，取消原因就是这个错误
+                }
+            })
         }
     }()
 }
 
 func (g *Group) Wait() error {
     g.wg.Wait()
+    if g.cancel != nil {
+        g.cancel(g.err)
+    }
     return g.err
 }
 ```
 
 1. **WaitGroup 等所有 goroutine**：和手写 WaitGroup 一样。
-2. **记住第一个错误**：用 Mutex 保护，多个错误同时返回时只记第一个（但不保证是哪个先返回）。
-3. **自动取消 ctx**：第一个错误发生时调用 `cancel()`，所有监听 `ctx.Done()` 的 goroutine 都能退出。
+2. **用 sync.Once 记住第一个错误**：最先执行到 `errOnce.Do` 的那个错误被记下，后面的错误被丢弃。这是第 3 节的 Once 的真实用法。
+3. **自动取消 ctx，并带上原因**：ctx 是 `context.WithCancelCause` 创建的，`context.Cause(ctx)` 能拿到导致取消的那个错误，
+   `ctx.Err()` 仍然只是 `context.Canceled`。第 10 节的综合项目就是靠 Cause 打印"worker 3 失败"。
+4. **Wait 返回前也会取消 ctx**：所以 `Wait` 返回后，`gctx` 一定已经结束，不能再拿它去做别的事。
 
 ### SetLimit：内置信号量
 
@@ -156,8 +167,10 @@ for i := 0; i < 10; i++ {
 ```
 
 内部用信号量：
-- `Go()` 调用时先 `sem.Acquire(1)`，超过限制就阻塞
-- goroutine 返回时 `sem.Release(1)`，唤醒一个等待的 `Go()`
+- 内部就是第 8 节的 buffered channel 信号量：`sem := make(chan token, n)`
+- `Go()` 先 `g.sem <- token{}`，满了就阻塞，**阻塞的是调用 `Go` 的 goroutine**（这里是 main），不是新启动的 goroutine
+- goroutine 返回时 `<-g.sem` 释放名额，阻塞在 `Go()` 的调用方继续
+- 还有一个 `TryGo(f) bool`：名额满了不阻塞，直接返回 false
 
 ### 和 WaitGroup 的对比
 
@@ -227,7 +240,7 @@ errgroup 把这些都封装好了。
 
 - 把 errgroup 的 ctx 传给每个 goroutine，每个阻塞操作都监听 ctx.Done()。
 - 需要限制并发数时用 `SetLimit`，不用自己写信号量。
-- 需要收集所有错误时，errgroup 不够用，要自己用 channel 或 `sync.Map`。
+- 需要收集所有错误时，errgroup 不够用：每个 goroutine 把错误写进自己下标的 `errs[i]`（各写各的，不需要锁），`Wait` 之后用 `errors.Join(errs...)` 合并。
 - 和 pipeline 结合：每个 stage 返回 error，用 errgroup 启动所有 stage，任意一个出错就停掉整条 pipeline。
 
 ---
@@ -238,7 +251,7 @@ errgroup 把这些都封装好了。
    Wait 会阻塞，直到所有通过 `Go` 启动的 goroutine 都返回。行为和 WaitGroup 一样。
 
 2. **多个 goroutine 同时返回错误，`Wait()` 返回哪一个？**
-   返回第一个到达 `Go` 内部 error 检查点的那个（竞争条件，不保证顺序）。后面的错误被丢弃。
+   返回最先执行到 `errOnce.Do` 的那个错误，也就是最先返回错误的 goroutine，和启动顺序无关。几个 goroutine 几乎同时失败时，谁先谁后取决于调度，不能依赖。后面的错误被丢弃。
 
 3. **`SetLimit(3)` 之外的 `Go` 调用会发生什么？**
    `Go()` 调用会阻塞，直到有正在运行的 goroutine 完成、释放信号量，才启动新的。不会 panic，也不会被拒绝。

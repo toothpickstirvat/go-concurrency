@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -26,7 +27,7 @@ func fetchURL(ctx context.Context, url string) error {
 	select {
 	case <-time.After(duration):
 		// 延迟结束，检查是否应该失败
-		if contains(url, "fail") {
+		if strings.Contains(url, "fail") {
 			return errors.New("抓取失败: " + url)
 		}
 		fmt.Printf("✓ 抓取成功: %s (耗时 %v)\n", url, duration)
@@ -36,16 +37,6 @@ func fetchURL(ctx context.Context, url string) error {
 		fmt.Printf("✗ 已取消: %s (ctx.Err: %v)\n", url, ctx.Err())
 		return ctx.Err()
 	}
-}
-
-// contains 简单的字符串包含检查
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func main() {
@@ -70,20 +61,22 @@ func main() {
 	// SetLimit 限制最多同时运行 3 个 goroutine，其余的在 g.Go() 调用时阻塞等待。
 	// 内部用信号量实现，避免一次性启动大量 goroutine。
 	// 不加限制时，10 个 goroutine 同时启动，第一个失败就取消所有，耗时约 170ms。
-	// 加限制后，前 3 个跑完才启动后面的，如果前 3 个都成功，总耗时会变长（约 400–500ms）。
+	// 加限制后是一个滑动窗口：任何一个 goroutine 结束，main 里阻塞在 g.Go 的下一个才能启动。
+	// 失败的 URL 要排队才轮到，出错的时间变晚，总耗时变长（实测约 440ms）。
+	// ctx 取消后，后面的 g.Go 照样会启动 goroutine，只是它们一进 select 就发现 ctx 已取消，立刻返回。
 	g.SetLimit(3)
 	start := time.Now()
 
 	// 循环启动 10 个 goroutine
 	for _, url := range urls {
-		url := url // 闭包变量捕获：Go 1.22+ 不需要，但为了兼容性保留
+		// Go 1.22 起循环变量每轮都是新的，闭包里直接用 url 不会捕获到同一个变量
 		g.Go(func() error {
 			return fetchURL(ctx, url)
 		})
 	}
 
 	// Wait 阻塞，直到所有 goroutine 都返回。
-	// 返回第一个非 nil error（多个 error 时返回第一个，但不保证是哪个）。
+	// 返回第一个非 nil error：哪个 goroutine 最先返回错误，就是哪个（内部用 sync.Once 记录），和启动顺序无关。
 	if err := g.Wait(); err != nil {
 		fmt.Printf("\n遇到错误: %v\n", err)
 	} else {
