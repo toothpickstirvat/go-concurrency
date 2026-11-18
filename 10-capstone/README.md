@@ -212,7 +212,7 @@ monitor 和 worker 在 ctx 结束时都返回 `nil`，所以正常到点 `g.Wait
 你已经覆盖了 Go 并发编程的核心。可以回头读 gmaker 的 `internal/engine/` 代码，会发现大部分模式你都亲手实现过了。剩下的是工程细节：锁的顺序、goroutine
 泄漏排查、race detector 的解读、性能调优——这些在真实代码里练。
 
-可选的进阶方向：
+可选的进阶方向（详细内容见 [`11-advanced/README.md`](../11-advanced/README.md)）：
 
 - Go memory model（happens-before 关系）
 - `runtime.GOMAXPROCS` 和调度器行为
