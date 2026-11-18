@@ -112,6 +112,19 @@ sem <- struct{}{}  // 满了就阻塞
 - 读走一个元素，腾出一个位置，被阻塞的写入者之一被唤醒
 - `struct{}{}` 是空结构体，不占内存，只用来占位
 
+**和 Linux C 的 POSIX semaphore 对比：**
+
+| Linux C | Go buffered channel |
+|---------|---------------------|
+| `sem_init(&sem, 0, 5)` | `make(chan struct{}, 5)` |
+| `sem_wait()` 减 1，为 0 时阻塞 | `sem <- struct{}{}` 写入，满时阻塞 |
+| `sem_post()` 加 1，唤醒等待者 | `<-sem` 读出，唤醒被阻塞的写入者 |
+
+本质都是一个计数器：
+- Linux C 的信号量操作计数器（值从 N 减到 0）
+- Go 的 buffered channel 操作缓冲区空位（空位从 N 减到 0）
+- 概念上是"反着数"，但效果完全一样
+
 **defer 的位置很重要：**
 
 ```go
